@@ -138,6 +138,25 @@ func ProvideHandlers(
 	}
 }
 
+// ProvideAdminUserHandler injects services used by first-party admin bridge APIs.
+func ProvideAdminUserHandler(
+	adminService service.AdminService,
+	concurrencyService *service.ConcurrencyService,
+	userPlatformQuotaRepo service.UserPlatformQuotaRepository,
+	billingCache service.BillingCache,
+	authService *service.AuthService,
+	apiKeyService *service.APIKeyService,
+) *admin.UserHandler {
+	return admin.NewUserHandler(
+		adminService,
+		concurrencyService,
+		userPlatformQuotaRepo,
+		billingCache,
+		admin.WithAuthService(authService),
+		admin.WithAPIKeyService(apiKeyService),
+	)
+}
+
 // ProviderSet is the Wire provider set for all handlers
 var ProviderSet = wire.NewSet(
 	// Top-level handlers
@@ -159,7 +178,7 @@ var ProviderSet = wire.NewSet(
 
 	// Admin handlers
 	admin.NewDashboardHandler,
-	admin.NewUserHandler,
+	ProvideAdminUserHandler,
 	admin.NewGroupHandler,
 	admin.NewAccountHandler,
 	admin.NewAnnouncementHandler,

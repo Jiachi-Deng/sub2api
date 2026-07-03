@@ -30,6 +30,22 @@ type UserHandler struct {
 	concurrencyService    *service.ConcurrencyService
 	userPlatformQuotaRepo service.UserPlatformQuotaRepository // T13 admin quota view
 	billingCache          service.BillingCache                // T17/T18 缓存失效（PUT/POST 路径）
+	authService           *service.AuthService
+	apiKeyService         *service.APIKeyService
+}
+
+type UserHandlerOption func(*UserHandler)
+
+func WithAuthService(authService *service.AuthService) UserHandlerOption {
+	return func(h *UserHandler) {
+		h.authService = authService
+	}
+}
+
+func WithAPIKeyService(apiKeyService *service.APIKeyService) UserHandlerOption {
+	return func(h *UserHandler) {
+		h.apiKeyService = apiKeyService
+	}
 }
 
 // NewUserHandler creates a new admin user handler
@@ -38,13 +54,20 @@ func NewUserHandler(
 	concurrencyService *service.ConcurrencyService,
 	userPlatformQuotaRepo service.UserPlatformQuotaRepository,
 	billingCache service.BillingCache,
+	options ...UserHandlerOption,
 ) *UserHandler {
-	return &UserHandler{
+	h := &UserHandler{
 		adminService:          adminService,
 		concurrencyService:    concurrencyService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
 		billingCache:          billingCache,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(h)
+		}
+	}
+	return h
 }
 
 // CreateUserRequest represents admin create user request
@@ -97,6 +120,22 @@ type BindUserAuthIdentityChannelRequest struct {
 	ChannelAppID   string         `json:"channel_app_id"`
 	ChannelSubject string         `json:"channel_subject"`
 	Metadata       map[string]any `json:"metadata"`
+}
+
+type CreateImpersonationTokenRequest struct {
+	Reason string `json:"reason"`
+}
+
+type IssueUserDeviceTokenRequest struct {
+	Device        string   `json:"device"`
+	Name          string   `json:"name"`
+	GroupID       *int64   `json:"group_id"`
+	Rotate        bool     `json:"rotate"`
+	Quota         *float64 `json:"quota"`
+	ExpiresInDays *int     `json:"expires_in_days"`
+	RateLimit5h   *float64 `json:"rate_limit_5h"`
+	RateLimit1d   *float64 `json:"rate_limit_1d"`
+	RateLimit7d   *float64 `json:"rate_limit_7d"`
 }
 
 // List handles listing all users with pagination
@@ -253,6 +292,147 @@ func (h *UserHandler) BindAuthIdentity(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+// CreateImpersonationToken issues a normal user access token for a target user.
+// POST /api/v1/admin/users/:id/impersonation-token
+func (h *UserHandler) CreateImpersonationToken(c *gin.Context) {
+	if h.authService == nil {
+		response.Error(c, 503, "auth service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req CreateImpersonationTokenRequest
+	_ = c.ShouldBindJSON(&req)
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	token, err := h.authService.GenerateToken(u)
+	if err != nil {
+		response.Error(c, 500, "failed to generate impersonation token")
+		return
+	}
+
+	response.Success(c, gin.H{
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   h.authService.GetAccessTokenExpiresIn(),
+		"user":         dto.UserFromServiceAdmin(u),
+	})
+}
+
+// IssueDeviceToken creates or rotates a per-device API key for a target user.
+// POST /api/v1/admin/users/:id/device-tokens
+func (h *UserHandler) IssueDeviceToken(c *gin.Context) {
+	if h.apiKeyService == nil {
+		response.Error(c, 503, "api key service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req IssueUserDeviceTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		device := strings.TrimSpace(req.Device)
+		if device == "" {
+			response.BadRequest(c, "name or device is required")
+			return
+		}
+		name = "TanStarter " + device
+	}
+	if len([]rune(name)) > 100 {
+		response.BadRequest(c, "name cannot exceed 100 characters")
+		return
+	}
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	keys, _, err := h.adminService.GetUserAPIKeys(c.Request.Context(), userID, 1, 200, "created_at", "desc")
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	var existing *service.APIKey
+	for i := range keys {
+		if keys[i].Name == name && keys[i].IsActive() {
+			existing = &keys[i]
+			break
+		}
+	}
+
+	if existing != nil && !req.Rotate {
+		response.Success(c, dto.APIKeyFromService(existing))
+		return
+	}
+
+	if existing != nil && req.Rotate {
+		disabled := service.StatusAPIKeyDisabled
+		if _, err := h.apiKeyService.Update(c.Request.Context(), existing.ID, userID, service.UpdateAPIKeyRequest{
+			Status: &disabled,
+		}); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
+
+	svcReq := service.CreateAPIKeyRequest{
+		Name:          name,
+		GroupID:       req.GroupID,
+		ExpiresInDays: req.ExpiresInDays,
+	}
+	if req.Quota != nil {
+		svcReq.Quota = *req.Quota
+	}
+	if req.RateLimit5h != nil {
+		svcReq.RateLimit5h = *req.RateLimit5h
+	}
+	if req.RateLimit1d != nil {
+		svcReq.RateLimit1d = *req.RateLimit1d
+	}
+	if req.RateLimit7d != nil {
+		svcReq.RateLimit7d = *req.RateLimit7d
+	}
+
+	key, err := h.apiKeyService.Create(c.Request.Context(), userID, svcReq)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, dto.APIKeyFromService(key))
 }
 
 // Create handles creating a new user
