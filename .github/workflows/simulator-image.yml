@@ -1,4 +1,4 @@
-name: TanStarter Image
+name: Simulator Image
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       image_tag:
         description: GHCR tag to publish
         required: false
-        default: tanstarter-bridge-admin
+        default: simulator-bridge-admin
   push:
     branches:
       - main
@@ -17,7 +17,7 @@ on:
       - deploy/docker-entrypoint.sh
       - docs/legal/**
       - frontend/**
-      - .github/workflows/tanstarter-image.yml
+      - .github/workflows/simulator-image.yml
 
 permissions:
   contents: read
@@ -34,7 +34,7 @@ jobs:
         id: image
         run: |
           owner="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          tag="${{ github.event.inputs.image_tag || 'tanstarter-bridge-admin' }}"
+          tag="${{ github.event.inputs.image_tag || 'simulator-bridge-admin' }}"
           echo "name=ghcr.io/${owner}/sub2api" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
@@ -58,7 +58,7 @@ jobs:
             ${{ steps.image.outputs.name }}:${{ steps.image.outputs.tag }}
             ${{ steps.image.outputs.name }}:sha-${{ github.sha }}
           build-args: |
-            VERSION=0.1.141-tanstarter.${{ github.run_number }}
+            VERSION=0.1.141-simulator.${{ github.run_number }}
             COMMIT=${{ github.sha }}
             GOPROXY=https://goproxy.cn,direct
             GOSUMDB=sum.golang.google.cn

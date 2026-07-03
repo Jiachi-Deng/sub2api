@@ -362,7 +362,7 @@ func (h *UserHandler) IssueDeviceToken(c *gin.Context) {
 			response.BadRequest(c, "name or device is required")
 			return
 		}
-		name = "TanStarter " + device
+		name = "Simulator " + device
 	}
 	if len([]rune(name)) > 100 {
 		response.BadRequest(c, "name cannot exceed 100 characters")

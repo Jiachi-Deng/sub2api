@@ -106,7 +106,7 @@ func TestSanitizeEmailHeader_OnlyLF(t *testing.T) {
 }
 
 func TestSanitizeEmailHeader_Clean(t *testing.T) {
-	require.Equal(t, "TanStarter", sanitizeEmailHeader("TanStarter"))
+	require.Equal(t, "Simulator", sanitizeEmailHeader("Simulator"))
 }
 
 func TestSanitizeEmailHeader_Empty(t *testing.T) {

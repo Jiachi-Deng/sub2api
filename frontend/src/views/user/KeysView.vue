@@ -1856,7 +1856,7 @@ const executeCcsImport = (row: ApiKey, clientType: CcSwitchClientType) => {
       };
     }
   })`
-  const providerName = (publicSettings.value?.site_name || 'tanstarter').trim() || 'tanstarter'
+  const providerName = (publicSettings.value?.site_name || 'simulator').trim() || 'simulator'
   const deeplink = buildCcSwitchImportDeeplink({
     baseUrl,
     platform,

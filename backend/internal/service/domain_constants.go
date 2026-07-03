@@ -261,7 +261,7 @@ const (
 	SettingKeyCustomMenuItems             = "custom_menu_items"             // 自定义菜单项（JSON 数组）
 	SettingKeyCustomEndpoints             = "custom_endpoints"              // 自定义端点列表（JSON 数组）
 
-	DefaultSiteName     = "TanStarter"
+	DefaultSiteName     = "Simulator"
 	DefaultSiteSubtitle = "Build access for Sim Desktop and Sim Design"
 
 	// 默认配置

@@ -17,7 +17,7 @@ describe('ccswitchImport utils', () => {
 
   const baseInput = {
     baseUrl: 'https://api.example.com',
-    providerName: 'TanStarter',
+    providerName: 'Simulator',
     apiKey: 'sk-test',
     usageScript: 'return true'
   }

@@ -69,7 +69,7 @@ import { sanitizeUrl } from '@/utils/url'
 
 const appStore = useAppStore()
 
-const siteName = computed(() => appStore.siteName || 'TanStarter')
+const siteName = computed(() => appStore.siteName || 'Simulator')
 const siteLogo = computed(() => sanitizeUrl(appStore.siteLogo || '', { allowRelative: true, allowDataUrl: true }))
 const siteSubtitle = computed(() => appStore.cachedPublicSettings?.site_subtitle || 'Build access for Sim Desktop and Sim Design')
 const settingsLoaded = computed(() => appStore.publicSettingsLoaded)

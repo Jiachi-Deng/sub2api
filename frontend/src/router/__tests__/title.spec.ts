@@ -11,8 +11,8 @@ describe('resolveDocumentTitle', () => {
   })
 
   it('站点名为空时，回退默认站点名', () => {
-    expect(resolveDocumentTitle('Dashboard', '')).toBe('Dashboard - TanStarter')
-    expect(resolveDocumentTitle(undefined, '   ')).toBe('TanStarter')
+    expect(resolveDocumentTitle('Dashboard', '')).toBe('Dashboard - Simulator')
+    expect(resolveDocumentTitle(undefined, '   ')).toBe('Simulator')
   })
 
   it('站点名变更时仅影响后续路由标题计算', () => {

@@ -28,7 +28,7 @@ async function bootstrap() {
   appStore.initFromInjectedConfig()
 
   // Set document title immediately after config is loaded
-  if (appStore.siteName && appStore.siteName !== 'TanStarter') {
+  if (appStore.siteName && appStore.siteName !== 'Simulator') {
     document.title = `${appStore.siteName} - Build Access`
   }
 
