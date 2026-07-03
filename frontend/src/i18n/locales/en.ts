@@ -14,9 +14,9 @@ export default {
     heroSubtitle: 'One Key, All AI Models',
     heroDescription: 'No need to manage multiple subscriptions. Access Claude, GPT, Gemini and more with a single API key',
     tags: {
-      subscriptionToApi: 'Subscription to API',
-      stickySession: 'Session Persistence',
-      realtimeBilling: 'Pay As You Go'
+      subscriptionToApi: 'Build Access',
+      stickySession: 'Client Session Routing',
+      realtimeBilling: 'Quota Tracking'
     },
     // Pain points section
     painPoints: {
@@ -46,12 +46,12 @@ export default {
       subtitle: 'Three simple steps to stress-free AI access'
     },
     features: {
-      unifiedGateway: 'One-Click Access',
-      unifiedGatewayDesc: 'Get a single API key to call all connected AI models. No separate applications needed.',
-      multiAccount: 'Always Reliable',
-      multiAccountDesc: 'Smart routing across multiple upstream accounts with automatic failover. Say goodbye to errors.',
-      balanceQuota: 'Pay What You Use',
-      balanceQuotaDesc: 'Usage-based billing with quota limits. Full visibility into team consumption.'
+      unifiedGateway: 'One Simulator Login',
+      unifiedGatewayDesc: 'Buy a plan once, then use the same Simulator account across Sim Desktop and Sim Design.',
+      multiAccount: 'Routed Model Access',
+      multiAccountDesc: 'Gateway routing keeps connected upstream model accounts behind a single client access layer.',
+      balanceQuota: 'Visible Quota Windows',
+      balanceQuotaDesc: 'Track balance, subscriptions, daily, weekly, and monthly usage from the same dashboard.'
     },
     // Comparison section
     comparison: {

@@ -14,9 +14,9 @@ export default {
     heroSubtitle: '一个密钥，畅用多个 AI 模型',
     heroDescription: '无需管理多个订阅账号，一站式接入 Claude、GPT、Gemini 等主流 AI 服务',
     tags: {
-      subscriptionToApi: '订阅转 API',
-      stickySession: '会话保持',
-      realtimeBilling: '按量计费'
+      subscriptionToApi: 'Build Access',
+      stickySession: '客户端会话路由',
+      realtimeBilling: '额度监控'
     },
     // 用户痛点区块
     painPoints: {
@@ -46,12 +46,12 @@ export default {
       subtitle: '简单三步，开始省心使用 AI'
     },
     features: {
-      unifiedGateway: '一键接入',
-      unifiedGatewayDesc: '获取一个 API 密钥，即可调用所有已接入的 AI 模型，无需分别申请。',
-      multiAccount: '稳定可靠',
-      multiAccountDesc: '智能调度多个上游账号，自动切换和负载均衡，告别频繁报错。',
-      balanceQuota: '用多少付多少',
-      balanceQuotaDesc: '按实际使用量计费，支持设置配额上限，团队用量一目了然。'
+      unifiedGateway: '一个 Simulator 登录',
+      unifiedGatewayDesc: '购买套餐后，用同一个 Simulator 账号打通 Sim Desktop 和 Sim Design。',
+      multiAccount: '模型路由接入',
+      multiAccountDesc: '网关把多个上游模型账号收在同一层客户端访问体系后面。',
+      balanceQuota: '可见的额度窗口',
+      balanceQuotaDesc: '在同一仪表盘查看余额、订阅、日额度、周额度和月额度。'
     },
     // 优势对比
     comparison: {
@@ -6224,7 +6224,7 @@ export default {
         siteNamePlaceholder: 'Simulator',
         siteSubtitle: '站点副标题',
         siteSubtitleHint: '显示在登录和注册页面',
-        siteSubtitlePlaceholder: '订阅转 API 转换平台',
+        siteSubtitlePlaceholder: 'Sim Desktop 和 Sim Design 的 Build Access',
         apiBaseUrl: 'API 端点地址',
         apiBaseUrlHint: '用于"使用密钥"、"导入到 CC Switch"和回调地址建议，留空则使用当前站点地址',
         apiBaseUrlPlaceholder: 'https://api.example.com',
