@@ -1076,6 +1076,34 @@ async function resumeWechatPaymentFromQuery() {
   }
 }
 
+function firstRouteQueryValue(name: string): string {
+  const value = route.query[name]
+  if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
+  return typeof value === 'string' ? value : ''
+}
+
+function applyDirectPurchaseQuery() {
+  const requestedPaymentType = normalizeVisibleMethod(firstRouteQueryValue('payment_type'))
+  if (requestedPaymentType && enabledMethods.value.includes(requestedPaymentType)) {
+    selectedMethod.value = requestedPaymentType
+  }
+
+  const planIdRaw = firstRouteQueryValue('plan_id')
+  const planIdValue = Number(planIdRaw)
+  const hasPlanId = planIdRaw !== '' && Number.isFinite(planIdValue)
+  const wantsSubscription =
+    route.query.tab === 'subscription'
+    || firstRouteQueryValue('order_type') === 'subscription'
+    || hasPlanId
+
+  if (wantsSubscription) {
+    activeTab.value = 'subscription'
+  }
+  if (hasPlanId && planIdValue > 0) {
+    selectedPlan.value = checkout.value.plans.find(plan => plan.id === planIdValue) ?? null
+  }
+}
+
 onMounted(async () => {
   try {
     const res = await paymentAPI.getCheckoutInfo()
@@ -1113,6 +1141,7 @@ onMounted(async () => {
         removeRecoverySnapshot()
       }
     }
+    applyDirectPurchaseQuery()
     await resumeWechatPaymentFromQuery()
     if (checkout.value.balance_disabled) {
       activeTab.value = 'subscription'

@@ -85,6 +85,18 @@ type AuthResponse struct {
 	User         *dto.User `json:"user"`
 }
 
+type RedeemBillingSessionRequest struct {
+	Token string `json:"token" binding:"required"`
+}
+
+type RedeemBillingSessionResponse struct {
+	AuthResponse
+	PlanID      int64  `json:"plan_id,omitempty"`
+	ReturnURL   string `json:"return_url,omitempty"`
+	PaymentType string `json:"payment_type,omitempty"`
+	Source      string `json:"source,omitempty"`
+}
+
 func ensureLoginUserActive(user *service.User) error {
 	if user == nil {
 		return infraerrors.Unauthorized("INVALID_USER", "user not found")
@@ -125,6 +137,43 @@ func (h *AuthHandler) respondWithTokenPair(c *gin.Context, user *service.User) {
 		ExpiresIn:    tokenPair.ExpiresIn,
 		TokenType:    "Bearer",
 		User:         dto.UserFromService(user),
+	})
+}
+
+// RedeemBillingSession exchanges a short-lived first-party billing session for
+// a normal user token pair. The checkout flow remains owned by the native
+// payment pages after this handoff.
+// POST /api/v1/auth/billing-session/redeem
+func (h *AuthHandler) RedeemBillingSession(c *gin.Context) {
+	if h.authService == nil {
+		response.Error(c, 503, "auth service not available")
+		return
+	}
+
+	var req RedeemBillingSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	tokenPair, user, claims, err := h.authService.RedeemBillingSessionToken(c.Request.Context(), strings.TrimSpace(req.Token))
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, RedeemBillingSessionResponse{
+		AuthResponse: AuthResponse{
+			AccessToken:  tokenPair.AccessToken,
+			RefreshToken: tokenPair.RefreshToken,
+			ExpiresIn:    tokenPair.ExpiresIn,
+			TokenType:    "Bearer",
+			User:         dto.UserFromService(user),
+		},
+		PlanID:      claims.PlanID,
+		ReturnURL:   claims.ReturnURL,
+		PaymentType: claims.PaymentType,
+		Source:      claims.Source,
 	})
 }
 

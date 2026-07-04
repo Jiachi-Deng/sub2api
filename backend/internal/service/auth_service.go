@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,8 @@ var (
 	ErrInvitationCodeRequired  = infraerrors.BadRequest("INVITATION_CODE_REQUIRED", "invitation code is required")
 	ErrInvitationCodeInvalid   = infraerrors.BadRequest("INVITATION_CODE_INVALID", "invalid or used invitation code")
 	ErrOAuthInvitationRequired = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
+	ErrBillingSessionInvalid   = infraerrors.Unauthorized("BILLING_SESSION_INVALID", "invalid billing session")
+	ErrBillingSessionExpired   = infraerrors.Unauthorized("BILLING_SESSION_EXPIRED", "billing session has expired")
 )
 
 // maxTokenLength 限制 token 大小，避免超长 header 触发解析时的异常内存分配。
@@ -51,12 +54,39 @@ const maxTokenLength = 8192
 // refreshTokenPrefix is the prefix for refresh tokens to distinguish them from access tokens.
 const refreshTokenPrefix = "rt_"
 
+const (
+	billingSessionAudience = "simulator-billing-session"
+	billingSessionTTL      = 5 * time.Minute
+)
+
 // JWTClaims JWT载荷数据
 type JWTClaims struct {
 	UserID       int64  `json:"user_id"`
 	Email        string `json:"email"`
 	Role         string `json:"role"`
 	TokenVersion int64  `json:"token_version"` // Used to invalidate tokens on password change
+	jwt.RegisteredClaims
+}
+
+type BillingSessionInput struct {
+	PlanID      int64
+	ReturnURL   string
+	PaymentType string
+	Source      string
+}
+
+type BillingSessionToken struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+type BillingSessionClaims struct {
+	UserID      int64  `json:"user_id"`
+	Email       string `json:"email"`
+	PlanID      int64  `json:"plan_id,omitempty"`
+	ReturnURL   string `json:"return_url,omitempty"`
+	PaymentType string `json:"payment_type,omitempty"`
+	Source      string `json:"source,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -1163,6 +1193,122 @@ func (s *AuthService) ValidateToken(tokenString string) (*JWTClaims, error) {
 	}
 
 	return nil, ErrInvalidToken
+}
+
+func (s *AuthService) GenerateBillingSessionToken(user *User, input BillingSessionInput) (*BillingSessionToken, error) {
+	if err := ensureActiveBillingSessionUser(user); err != nil {
+		return nil, err
+	}
+	if err := validateBillingSessionReturnURL(input.ReturnURL); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(billingSessionTTL)
+	source := strings.TrimSpace(input.Source)
+	if source == "" {
+		source = "simulator"
+	}
+
+	claims := &BillingSessionClaims{
+		UserID:      user.ID,
+		Email:       user.Email,
+		PlanID:      input.PlanID,
+		ReturnURL:   strings.TrimSpace(input.ReturnURL),
+		PaymentType: strings.TrimSpace(input.PaymentType),
+		Source:      source,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Audience:  jwt.ClaimStrings{billingSessionAudience},
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			Subject:   strconv.FormatInt(user.ID, 10),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(s.cfg.JWT.Secret))
+	if err != nil {
+		return nil, fmt.Errorf("sign billing session token: %w", err)
+	}
+
+	return &BillingSessionToken{
+		Token:     signed,
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+func (s *AuthService) RedeemBillingSessionToken(ctx context.Context, tokenString string) (*TokenPair, *User, *BillingSessionClaims, error) {
+	if len(tokenString) > maxTokenLength {
+		return nil, nil, nil, ErrTokenTooLarge
+	}
+
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Name}),
+		jwt.WithAudience(billingSessionAudience),
+	)
+	claims := &BillingSessionClaims{}
+	token, err := parser.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (any, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(s.cfg.JWT.Secret), nil
+	})
+	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return nil, nil, nil, ErrBillingSessionExpired
+		}
+		return nil, nil, nil, ErrBillingSessionInvalid
+	}
+	if token == nil || !token.Valid {
+		return nil, nil, nil, ErrBillingSessionInvalid
+	}
+
+	user, err := s.userRepo.GetByID(ctx, claims.UserID)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return nil, nil, nil, ErrBillingSessionInvalid
+		}
+		logger.LegacyPrintf("service.auth", "[Auth] Database error redeeming billing session: %v", err)
+		return nil, nil, nil, ErrServiceUnavailable
+	}
+	if err := ensureActiveBillingSessionUser(user); err != nil {
+		return nil, nil, nil, err
+	}
+	if claims.Email != "" && !strings.EqualFold(strings.TrimSpace(claims.Email), strings.TrimSpace(user.Email)) {
+		return nil, nil, nil, ErrBillingSessionInvalid
+	}
+
+	tokenPair, err := s.GenerateTokenPair(ctx, user, "")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("generate billing session token pair: %w", err)
+	}
+	return tokenPair, user, claims, nil
+}
+
+func ensureActiveBillingSessionUser(user *User) error {
+	if user == nil {
+		return ErrBillingSessionInvalid
+	}
+	if !user.IsActive() {
+		return ErrUserNotActive
+	}
+	return nil
+}
+
+func validateBillingSessionReturnURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ErrBillingSessionInvalid
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ErrBillingSessionInvalid
+	}
+	return nil
 }
 
 func randomHexString(byteLength int) (string, error) {

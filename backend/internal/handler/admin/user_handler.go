@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -124,6 +125,21 @@ type BindUserAuthIdentityChannelRequest struct {
 
 type CreateImpersonationTokenRequest struct {
 	Reason string `json:"reason"`
+}
+
+type CreateBillingSessionRequest struct {
+	PlanID       int64  `json:"plan_id"`
+	ReturnURL    string `json:"return_url"`
+	PaymentType  string `json:"payment_type"`
+	Source       string `json:"source"`
+	BaseURL      string `json:"base_url"`
+	PurchasePath string `json:"purchase_path"`
+}
+
+type CreateBillingSessionResponse struct {
+	Token       string    `json:"token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	RedirectURL string    `json:"redirect_url"`
 }
 
 type IssueUserDeviceTokenRequest struct {
@@ -332,6 +348,57 @@ func (h *UserHandler) CreateImpersonationToken(c *gin.Context) {
 		"token_type":   "Bearer",
 		"expires_in":   h.authService.GetAccessTokenExpiresIn(),
 		"user":         dto.UserFromServiceAdmin(u),
+	})
+}
+
+// CreateBillingSession issues a short-lived checkout handoff URL for a target user.
+// POST /api/v1/admin/users/:id/billing-session
+func (h *UserHandler) CreateBillingSession(c *gin.Context) {
+	if h.authService == nil {
+		response.Error(c, 503, "auth service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req CreateBillingSessionRequest
+	_ = c.ShouldBindJSON(&req)
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	session, err := h.authService.GenerateBillingSessionToken(u, service.BillingSessionInput{
+		PlanID:      req.PlanID,
+		ReturnURL:   req.ReturnURL,
+		PaymentType: req.PaymentType,
+		Source:      req.Source,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	redirectURL, err := buildBillingSessionRedirectURL(c, req, session.Token)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	response.Success(c, CreateBillingSessionResponse{
+		Token:       session.Token,
+		ExpiresAt:   session.ExpiresAt,
+		RedirectURL: redirectURL,
 	})
 }
 
@@ -1033,4 +1100,63 @@ func (h *UserHandler) ResetUserPlatformQuotaWindow(c *gin.Context) {
 		out = append(out, quotaview.LazyZeroQuotaForResponse(records[i], now, true))
 	}
 	response.Success(c, map[string]any{"platform_quotas": out})
+}
+
+func buildBillingSessionRedirectURL(c *gin.Context, req CreateBillingSessionRequest, token string) (string, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	if baseURL == "" && c != nil && c.Request != nil {
+		scheme := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))
+		if scheme == "" {
+			if c.Request.TLS != nil {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+		}
+		host := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+		if host == "" {
+			host = c.Request.Host
+		}
+		if host != "" {
+			baseURL = scheme + "://" + host
+		}
+	}
+	if baseURL == "" {
+		return "", fmt.Errorf("base_url is required")
+	}
+
+	target, err := url.Parse(baseURL)
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return "", fmt.Errorf("base_url must be an absolute http(s) URL")
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return "", fmt.Errorf("base_url must be an absolute http(s) URL")
+	}
+
+	purchasePath := strings.TrimSpace(req.PurchasePath)
+	if purchasePath == "" {
+		purchasePath = "/billing-session"
+	}
+	if !strings.HasPrefix(purchasePath, "/") {
+		purchasePath = "/" + purchasePath
+	}
+	target.Path = purchasePath
+	target.RawQuery = ""
+
+	query := target.Query()
+	query.Set("token", token)
+	if req.PlanID > 0 {
+		query.Set("plan_id", strconv.FormatInt(req.PlanID, 10))
+		query.Set("order_type", "subscription")
+		query.Set("tab", "subscription")
+	}
+	if paymentType := strings.TrimSpace(req.PaymentType); paymentType != "" {
+		query.Set("payment_type", paymentType)
+	}
+	if returnURL := strings.TrimSpace(req.ReturnURL); returnURL != "" {
+		query.Set("return_to", returnURL)
+	}
+	target.RawQuery = query.Encode()
+
+	return target.String(), nil
 }

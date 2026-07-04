@@ -249,6 +249,7 @@ func registerUserManagementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		users.GET("/:id", h.Admin.User.GetByID)
 		users.POST("/:id/auth-identities", h.Admin.User.BindAuthIdentity)
 		users.POST("/:id/impersonation-token", h.Admin.User.CreateImpersonationToken)
+		users.POST("/:id/billing-session", h.Admin.User.CreateBillingSession)
 		users.POST("/:id/device-tokens", h.Admin.User.IssueDeviceToken)
 		users.POST("", h.Admin.User.Create)
 		users.PUT("/:id", h.Admin.User.Update)
