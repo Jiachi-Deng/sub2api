@@ -46,6 +46,7 @@ var (
 	ErrOAuthInvitationRequired = infraerrors.Forbidden("OAUTH_INVITATION_REQUIRED", "invitation code required to complete oauth registration")
 	ErrBillingSessionInvalid   = infraerrors.Unauthorized("BILLING_SESSION_INVALID", "invalid billing session")
 	ErrBillingSessionExpired   = infraerrors.Unauthorized("BILLING_SESSION_EXPIRED", "billing session has expired")
+	ErrBillingSessionConsumed  = infraerrors.Unauthorized("BILLING_SESSION_ALREADY_REDEEMED", "billing session has already been redeemed")
 )
 
 // maxTokenLength 限制 token 大小，避免超长 header 触发解析时的异常内存分配。
@@ -1205,6 +1206,10 @@ func (s *AuthService) GenerateBillingSessionToken(user *User, input BillingSessi
 
 	now := time.Now()
 	expiresAt := now.Add(billingSessionTTL)
+	jti, err := randomHexString(16)
+	if err != nil {
+		return nil, fmt.Errorf("generate billing session id: %w", err)
+	}
 	source := strings.TrimSpace(input.Source)
 	if source == "" {
 		source = "simulator"
@@ -1219,6 +1224,7 @@ func (s *AuthService) GenerateBillingSessionToken(user *User, input BillingSessi
 		Source:      source,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Audience:  jwt.ClaimStrings{billingSessionAudience},
+			ID:        jti,
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
@@ -1278,12 +1284,37 @@ func (s *AuthService) RedeemBillingSessionToken(ctx context.Context, tokenString
 	if claims.Email != "" && !strings.EqualFold(strings.TrimSpace(claims.Email), strings.TrimSpace(user.Email)) {
 		return nil, nil, nil, ErrBillingSessionInvalid
 	}
+	if err := s.consumeBillingSession(ctx, claims); err != nil {
+		return nil, nil, nil, err
+	}
 
 	tokenPair, err := s.GenerateTokenPair(ctx, user, "")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("generate billing session token pair: %w", err)
 	}
 	return tokenPair, user, claims, nil
+}
+
+func (s *AuthService) consumeBillingSession(ctx context.Context, claims *BillingSessionClaims) error {
+	if s == nil || s.entClient == nil || claims == nil || strings.TrimSpace(claims.ID) == "" || claims.ExpiresAt == nil {
+		return ErrBillingSessionInvalid
+	}
+	hash := sha256.Sum256([]byte(claims.ID))
+	keyHash := hex.EncodeToString(hash[:])
+	_, err := s.entClient.IdempotencyRecord.Create().
+		SetScope("billing-session-redeem").
+		SetIdempotencyKeyHash(keyHash).
+		SetRequestFingerprint(keyHash).
+		SetStatus("succeeded").
+		SetExpiresAt(claims.ExpiresAt.Time).
+		Save(ctx)
+	if err == nil {
+		return nil
+	}
+	if dbent.IsConstraintError(err) {
+		return ErrBillingSessionConsumed
+	}
+	return fmt.Errorf("consume billing session: %w", err)
 }
 
 func ensureActiveBillingSessionUser(user *User) error {
@@ -1299,13 +1330,17 @@ func ensureActiveBillingSessionUser(user *User) error {
 func validateBillingSessionReturnURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return ErrBillingSessionInvalid
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return ErrBillingSessionInvalid
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return ErrBillingSessionInvalid
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "simulator.college" && !strings.HasSuffix(host, ".simulator.college") {
 		return ErrBillingSessionInvalid
 	}
 	return nil
