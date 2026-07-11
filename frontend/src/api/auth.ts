@@ -148,6 +148,21 @@ export async function register(userData: RegisterRequest): Promise<AuthResponse>
   return data
 }
 
+export async function redeemBillingSession(token: string): Promise<BillingSessionRedeemResponse> {
+  const { data } = await apiClient.post<BillingSessionRedeemResponse>('/auth/billing-session/redeem', { token })
+
+  setAuthToken(data.access_token)
+  if (data.refresh_token) {
+    setRefreshToken(data.refresh_token)
+  }
+  if (data.expires_in) {
+    setTokenExpiresAt(data.expires_in)
+  }
+  localStorage.setItem('auth_user', JSON.stringify(data.user))
+
+  return data
+}
+
 /**
  * Get current authenticated user
  * @returns User profile data
@@ -191,6 +206,13 @@ export interface OAuthTokenResponse {
   refresh_token?: string
   expires_in?: number
   token_type?: string
+}
+
+export interface BillingSessionRedeemResponse extends AuthResponse {
+  plan_id?: number
+  return_url?: string
+  payment_type?: string
+  source?: string
 }
 
 export interface PendingOAuthBindLoginResponse extends Partial<OAuthTokenResponse> {
@@ -684,6 +706,7 @@ export const authAPI = {
   getPendingOAuthBindLoginKind,
   isPendingOAuthCreateAccountRequired,
   hasPendingOAuthSuggestedProfile,
+  redeemBillingSession,
   completePendingOAuthBindLogin,
   createPendingLinuxDoOAuthAccount,
   createPendingOIDCOAuthAccount,

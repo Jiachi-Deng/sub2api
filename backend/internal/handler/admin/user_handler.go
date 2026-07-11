@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,22 @@ type UserHandler struct {
 	concurrencyService    *service.ConcurrencyService
 	userPlatformQuotaRepo service.UserPlatformQuotaRepository // T13 admin quota view
 	billingCache          service.BillingCache                // T17/T18 缓存失效（PUT/POST 路径）
+	authService           *service.AuthService
+	apiKeyService         *service.APIKeyService
+}
+
+type UserHandlerOption func(*UserHandler)
+
+func WithAuthService(authService *service.AuthService) UserHandlerOption {
+	return func(h *UserHandler) {
+		h.authService = authService
+	}
+}
+
+func WithAPIKeyService(apiKeyService *service.APIKeyService) UserHandlerOption {
+	return func(h *UserHandler) {
+		h.apiKeyService = apiKeyService
+	}
 }
 
 // NewUserHandler creates a new admin user handler
@@ -38,13 +55,20 @@ func NewUserHandler(
 	concurrencyService *service.ConcurrencyService,
 	userPlatformQuotaRepo service.UserPlatformQuotaRepository,
 	billingCache service.BillingCache,
+	options ...UserHandlerOption,
 ) *UserHandler {
-	return &UserHandler{
+	h := &UserHandler{
 		adminService:          adminService,
 		concurrencyService:    concurrencyService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
 		billingCache:          billingCache,
 	}
+	for _, option := range options {
+		if option != nil {
+			option(h)
+		}
+	}
+	return h
 }
 
 // CreateUserRequest represents admin create user request
@@ -97,6 +121,37 @@ type BindUserAuthIdentityChannelRequest struct {
 	ChannelAppID   string         `json:"channel_app_id"`
 	ChannelSubject string         `json:"channel_subject"`
 	Metadata       map[string]any `json:"metadata"`
+}
+
+type CreateImpersonationTokenRequest struct {
+	Reason string `json:"reason"`
+}
+
+type CreateBillingSessionRequest struct {
+	PlanID       int64  `json:"plan_id"`
+	ReturnURL    string `json:"return_url"`
+	PaymentType  string `json:"payment_type"`
+	Source       string `json:"source"`
+	BaseURL      string `json:"base_url"`
+	PurchasePath string `json:"purchase_path"`
+}
+
+type CreateBillingSessionResponse struct {
+	Token       string    `json:"token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	RedirectURL string    `json:"redirect_url"`
+}
+
+type IssueUserDeviceTokenRequest struct {
+	Device        string   `json:"device"`
+	Name          string   `json:"name"`
+	GroupID       *int64   `json:"group_id"`
+	Rotate        bool     `json:"rotate"`
+	Quota         *float64 `json:"quota"`
+	ExpiresInDays *int     `json:"expires_in_days"`
+	RateLimit5h   *float64 `json:"rate_limit_5h"`
+	RateLimit1d   *float64 `json:"rate_limit_1d"`
+	RateLimit7d   *float64 `json:"rate_limit_7d"`
 }
 
 // List handles listing all users with pagination
@@ -253,6 +308,236 @@ func (h *UserHandler) BindAuthIdentity(c *gin.Context) {
 		return
 	}
 	response.Success(c, result)
+}
+
+// CreateImpersonationToken issues a normal user access token for a target user.
+// POST /api/v1/admin/users/:id/impersonation-token
+func (h *UserHandler) CreateImpersonationToken(c *gin.Context) {
+	if h.authService == nil {
+		response.Error(c, 503, "auth service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req CreateImpersonationTokenRequest
+	_ = c.ShouldBindJSON(&req)
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	token, err := h.authService.GenerateToken(u)
+	if err != nil {
+		response.Error(c, 500, "failed to generate impersonation token")
+		return
+	}
+
+	response.Success(c, gin.H{
+		"access_token": token,
+		"token_type":   "Bearer",
+		"expires_in":   h.authService.GetAccessTokenExpiresIn(),
+		"user":         dto.UserFromServiceAdmin(u),
+	})
+}
+
+// CreateBillingSession issues a short-lived checkout handoff URL for a target user.
+// POST /api/v1/admin/users/:id/billing-session
+func (h *UserHandler) CreateBillingSession(c *gin.Context) {
+	if h.authService == nil {
+		response.Error(c, 503, "auth service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req CreateBillingSessionRequest
+	_ = c.ShouldBindJSON(&req)
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	session, err := h.authService.GenerateBillingSessionToken(u, service.BillingSessionInput{
+		PlanID:      req.PlanID,
+		ReturnURL:   req.ReturnURL,
+		PaymentType: req.PaymentType,
+		Source:      req.Source,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	redirectURL, err := buildBillingSessionRedirectURL(c, req, session.Token)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+
+	response.Success(c, CreateBillingSessionResponse{
+		Token:       session.Token,
+		ExpiresAt:   session.ExpiresAt,
+		RedirectURL: redirectURL,
+	})
+}
+
+// IssueDeviceToken creates or rotates a per-device API key for a target user.
+// POST /api/v1/admin/users/:id/device-tokens
+func (h *UserHandler) IssueDeviceToken(c *gin.Context) {
+	if h.apiKeyService == nil {
+		response.Error(c, 503, "api key service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+
+	var req IssueUserDeviceTokenRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		device := strings.TrimSpace(req.Device)
+		if device == "" {
+			response.BadRequest(c, "name or device is required")
+			return
+		}
+		name = "Simulator " + device
+	}
+	if len([]rune(name)) > 100 {
+		response.BadRequest(c, "name cannot exceed 100 characters")
+		return
+	}
+
+	u, err := h.adminService.GetUser(c.Request.Context(), userID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !u.IsActive() {
+		response.ErrorFrom(c, service.ErrUserNotActive)
+		return
+	}
+
+	keys, _, err := h.adminService.GetUserAPIKeys(c.Request.Context(), userID, 1, 200, "created_at", "desc")
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	var existing *service.APIKey
+	for i := range keys {
+		if keys[i].Name == name && keys[i].IsActive() {
+			existing = &keys[i]
+			break
+		}
+	}
+
+	if existing != nil && !req.Rotate {
+		response.Success(c, deviceTokenForExistingKey(existing))
+		return
+	}
+
+	if existing != nil && req.Rotate {
+		disabled := service.StatusAPIKeyDisabled
+		if _, err := h.apiKeyService.Update(c.Request.Context(), existing.ID, userID, service.UpdateAPIKeyRequest{
+			Status: &disabled,
+		}); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
+
+	svcReq := service.CreateAPIKeyRequest{
+		Name:          name,
+		GroupID:       req.GroupID,
+		ExpiresInDays: req.ExpiresInDays,
+	}
+	if req.Quota != nil {
+		svcReq.Quota = *req.Quota
+	}
+	if req.RateLimit5h != nil {
+		svcReq.RateLimit5h = *req.RateLimit5h
+	}
+	if req.RateLimit1d != nil {
+		svcReq.RateLimit1d = *req.RateLimit1d
+	}
+	if req.RateLimit7d != nil {
+		svcReq.RateLimit7d = *req.RateLimit7d
+	}
+
+	key, err := h.apiKeyService.Create(c.Request.Context(), userID, svcReq)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, dto.APIKeyFromService(key))
+}
+
+// RevokeDeviceToken disables a target user's device API key.
+// DELETE /api/v1/admin/users/:id/device-tokens/:key_id
+func (h *UserHandler) RevokeDeviceToken(c *gin.Context) {
+	if h.apiKeyService == nil {
+		response.Error(c, 503, "api key service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid device token ID")
+		return
+	}
+
+	disabled := service.StatusAPIKeyDisabled
+	key, err := h.apiKeyService.Update(c.Request.Context(), keyID, userID, service.UpdateAPIKeyRequest{
+		Status: &disabled,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, deviceTokenForExistingKey(key))
+}
+
+func deviceTokenForExistingKey(key *service.APIKey) *dto.APIKey {
+	out := dto.APIKeyFromService(key)
+	if out != nil {
+		out.Key = ""
+	}
+	return out
 }
 
 // Create handles creating a new user
@@ -853,4 +1138,63 @@ func (h *UserHandler) ResetUserPlatformQuotaWindow(c *gin.Context) {
 		out = append(out, quotaview.LazyZeroQuotaForResponse(records[i], now, true))
 	}
 	response.Success(c, map[string]any{"platform_quotas": out})
+}
+
+func buildBillingSessionRedirectURL(c *gin.Context, req CreateBillingSessionRequest, token string) (string, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(req.BaseURL), "/")
+	if baseURL == "" && c != nil && c.Request != nil {
+		scheme := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))
+		if scheme == "" {
+			if c.Request.TLS != nil {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+		}
+		host := strings.TrimSpace(c.GetHeader("X-Forwarded-Host"))
+		if host == "" {
+			host = c.Request.Host
+		}
+		if host != "" {
+			baseURL = scheme + "://" + host
+		}
+	}
+	if baseURL == "" {
+		return "", fmt.Errorf("base_url is required")
+	}
+
+	target, err := url.Parse(baseURL)
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return "", fmt.Errorf("base_url must be an absolute http(s) URL")
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return "", fmt.Errorf("base_url must be an absolute http(s) URL")
+	}
+
+	purchasePath := strings.TrimSpace(req.PurchasePath)
+	if purchasePath == "" {
+		purchasePath = "/billing-session"
+	}
+	if !strings.HasPrefix(purchasePath, "/") {
+		purchasePath = "/" + purchasePath
+	}
+	target.Path = purchasePath
+	target.RawQuery = ""
+
+	query := target.Query()
+	query.Set("token", token)
+	if req.PlanID > 0 {
+		query.Set("plan_id", strconv.FormatInt(req.PlanID, 10))
+		query.Set("order_type", "subscription")
+		query.Set("tab", "subscription")
+	}
+	if paymentType := strings.TrimSpace(req.PaymentType); paymentType != "" {
+		query.Set("payment_type", paymentType)
+	}
+	if returnURL := strings.TrimSpace(req.ReturnURL); returnURL != "" {
+		query.Set("return_to", returnURL)
+	}
+	target.RawQuery = query.Encode()
+
+	return target.String(), nil
 }
