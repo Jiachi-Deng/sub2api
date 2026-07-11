@@ -461,7 +461,7 @@ func (h *UserHandler) IssueDeviceToken(c *gin.Context) {
 	}
 
 	if existing != nil && !req.Rotate {
-		response.Success(c, dto.APIKeyFromService(existing))
+		response.Success(c, deviceTokenForExistingKey(existing))
 		return
 	}
 
@@ -500,6 +500,44 @@ func (h *UserHandler) IssueDeviceToken(c *gin.Context) {
 	}
 
 	response.Success(c, dto.APIKeyFromService(key))
+}
+
+// RevokeDeviceToken disables a target user's device API key.
+// DELETE /api/v1/admin/users/:id/device-tokens/:key_id
+func (h *UserHandler) RevokeDeviceToken(c *gin.Context) {
+	if h.apiKeyService == nil {
+		response.Error(c, 503, "api key service not available")
+		return
+	}
+
+	userID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid user ID")
+		return
+	}
+	keyID, err := strconv.ParseInt(c.Param("key_id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid device token ID")
+		return
+	}
+
+	disabled := service.StatusAPIKeyDisabled
+	key, err := h.apiKeyService.Update(c.Request.Context(), keyID, userID, service.UpdateAPIKeyRequest{
+		Status: &disabled,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, deviceTokenForExistingKey(key))
+}
+
+func deviceTokenForExistingKey(key *service.APIKey) *dto.APIKey {
+	out := dto.APIKeyFromService(key)
+	if out != nil {
+		out.Key = ""
+	}
+	return out
 }
 
 // Create handles creating a new user
